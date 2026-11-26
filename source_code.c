@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#include <ctype.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -16,6 +17,8 @@
 #define TOKEN_FILE "token.dat"
 #define SALES_ITEMS_FILE "salesitems.txt"
 #define FEEDBACK_FILE "feedback.txt"
+#define ADMIN_FILE "admin.dat"     /* stores the password once it is changed */
+#define LOW_STOCK 5                /* warn the admin at or below this stock */
 #define MAX_CART 20
 #define DISCOUNT_LIMIT 200.0   /* discount applies above this bill amount */
 #define DISCOUNT_RATE 0.10     /* 10% */
@@ -944,6 +947,251 @@ void viewFeedback() {
     printf("Average rating  : %.1f/5\n", (float)ratingSum / count);
 }
 
+/* ---------- MENU SEARCH & CATEGORY FILTER ---------- */
+
+/* Returns 1 if 'word' appears inside 'text', ignoring upper/lower case */
+int containsIgnoreCase(const char *text, const char *word) {
+    int tl = strlen(text), wl = strlen(word);
+    for (int i = 0; i + wl <= tl; i++) {
+        int j = 0;
+        while (j < wl && tolower((unsigned char)text[i + j]) == tolower((unsigned char)word[j])) {
+            j++;
+        }
+        if (j == wl) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void printMenuHeader() {
+    printf("\n%-5s %-20s %-12s %-8s\n", "ID", "Name", "Category", "Price");
+    printf("-----------------------------------------------------------\n");
+}
+
+void printMenuRow(int i) {
+    printf("%-5d %-20s %-12s %-8.2f",
+           menu[i].id, menu[i].name, menu[i].category, menu[i].price);
+    if (menu[i].stock == 0) {
+        printf(" Unavailable");
+    }
+    printf("\n");
+}
+
+void searchMenu() {
+    char word[50];
+    printf("Search (item name or category): ");
+    scanf(" %49[^\n]", word);
+
+    int found = 0;
+    for (int i = 0; i < itemCount; i++) {
+        if (containsIgnoreCase(menu[i].name, word) ||
+            containsIgnoreCase(menu[i].category, word)) {
+            if (found == 0) {
+                printMenuHeader();
+            }
+            printMenuRow(i);
+            found++;
+        }
+    }
+    if (found == 0) {
+        printf("No items match \"%s\".\n", word);
+    }
+}
+
+void filterByCategory() {
+    char cats[MAX_ITEMS][30];       /* the different categories on the menu */
+    int catCount = 0;
+
+    for (int i = 0; i < itemCount; i++) {
+        int seen = 0;
+        for (int j = 0; j < catCount; j++) {
+            if (strcmp(cats[j], menu[i].category) == 0) {
+                seen = 1;
+            }
+        }
+        if (!seen) {
+            strcpy(cats[catCount], menu[i].category);
+            catCount++;
+        }
+    }
+    if (catCount == 0) {
+        printf("No items yet.\n");
+        return;
+    }
+
+    printf("\nCategories:\n");
+    for (int i = 0; i < catCount; i++) {
+        printf("%d. %s\n", i + 1, cats[i]);
+    }
+    int pick = readInt("Choose a category: ");
+    if (pick < 1 || pick > catCount) {
+        printf("Invalid choice.\n");
+        return;
+    }
+
+    printMenuHeader();
+    for (int i = 0; i < itemCount; i++) {
+        if (strcmp(menu[i].category, cats[pick - 1]) == 0) {
+            printMenuRow(i);
+        }
+    }
+}
+
+void browseMenu() {
+    int choice;
+    do {
+        printf("\n===== BROWSE MENU =====\n");
+        printf("1. Full menu\n");
+        printf("2. Search by name or category\n");
+        printf("3. Filter by category\n");
+        printf("0. Back\n");
+        choice = readInt("Enter choice: ");
+
+        switch (choice) {
+            case 1: viewMenu(0); break;
+            case 2: searchMenu(); break;
+            case 3: filterByCategory(); break;
+            case 0: break;
+            default: printf("Invalid choice.\n");
+        }
+    } while (choice != 0);
+}
+
+/* ---------- LOW STOCK ALERT ---------- */
+
+/* Shown to the admin right after login */
+void lowStockAlert() {
+    int found = 0;
+    for (int i = 0; i < itemCount; i++) {
+        if (menu[i].stock <= LOW_STOCK) {
+            if (!found) {
+                printf("\n!!! LOW STOCK ALERT !!!\n");
+                found = 1;
+            }
+            if (menu[i].stock == 0) {
+                printf("  - %s: OUT OF STOCK\n", menu[i].name);
+            } else {
+                printf("  - %s: only %d left\n", menu[i].name, menu[i].stock);
+            }
+        }
+    }
+}
+
+/* ---------- BILL REPRINT ---------- */
+
+void reprintBill() {
+    int token = readInt("\nEnter the token number of the bill (0 to go back): ");
+    if (token == 0) {
+        return;
+    }
+
+    FILE *fp = fopen(BILLS_FILE, "r");
+    if (fp == NULL) {
+        printf("No bills recorded yet.\n");
+        return;
+    }
+
+    char line[200], date[20], mode[20];
+    int t, found = 0;
+    float subtotal = 0, discount = 0, total = 0;
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        if (sscanf(line, "%d|%19[^|]|%f|%f|%f|%19s",
+                   &t, date, &subtotal, &discount, &total, mode) == 6 && t == token) {
+            found = 1;
+            break;
+        }
+    }
+    fclose(fp);
+
+    if (!found) {
+        printf("No bill found with token %d.\n", token);
+        return;
+    }
+
+    printf("\n======= BILL (REPRINT) =======\n");
+    printf("Token No : %d\n", token);
+    printf("Date     : %s\n", date);
+    printf("----------------------------\n");
+    printf("%-18s %3s %9s\n", "Item", "Qty", "Amount");
+
+    FILE *fi = fopen(SALES_ITEMS_FILE, "r");
+    if (fi != NULL) {
+        char name[50], itemDate[20];
+        int itemToken, qty;
+        float amount;
+        while (fgets(line, sizeof(line), fi) != NULL) {
+            if (sscanf(line, "%d|%19[^|]|%49[^|]|%d|%f",
+                       &itemToken, itemDate, name, &qty, &amount) == 5
+                && itemToken == token) {
+                printf("%-18s %3d %9.2f\n", name, qty, amount);
+            }
+        }
+        fclose(fi);
+    }
+
+    printf("----------------------------\n");
+    printf("%-22s %9.2f\n", "Subtotal", subtotal);
+    if (discount > 0) {
+        printf("%-22s %9.2f\n", "Discount (10%)", -discount);
+    }
+    printf("%-22s %9.2f\n", "TOTAL", total);
+    printf("Paid by  : %s\n", mode);
+    printf("============================\n");
+}
+
+/* ---------- ADMIN PASSWORD ---------- */
+
+/* Copies the current admin password into 'out' (default until it is changed) */
+void getAdminPass(char *out) {
+    strcpy(out, ADMIN_PASS);
+    FILE *fp = fopen(ADMIN_FILE, "r");
+    if (fp != NULL) {
+        char saved[30];
+        if (fscanf(fp, "%29s", saved) == 1) {
+            strcpy(out, saved);
+        }
+        fclose(fp);
+    }
+}
+
+void changePassword() {
+    char current[30], saved[30], newPass[30], again[30];
+    getAdminPass(saved);
+
+    printf("\n--- Change Admin Password ---\n");
+    printf("Current password: ");
+    scanf("%29s", current);
+    if (strcmp(current, saved) != 0) {
+        printf("Wrong current password.\n");
+        return;
+    }
+
+    printf("New password (at least 4 characters, no spaces): ");
+    scanf("%29s", newPass);
+    if (strlen(newPass) < 4) {
+        printf("Too short. Password not changed.\n");
+        return;
+    }
+
+    printf("Confirm new password: ");
+    scanf("%29s", again);
+    if (strcmp(newPass, again) != 0) {
+        printf("Passwords do not match. Password not changed.\n");
+        return;
+    }
+
+    FILE *fp = fopen(ADMIN_FILE, "w");
+    if (fp == NULL) {
+        printf("Error: could not save the new password.\n");
+        return;
+    }
+    fprintf(fp, "%s", newPass);
+    fclose(fp);
+    printf("Password changed successfully.\n");
+}
+
 /* ---------- ADMIN LOGIN & MENU ---------- */
 
 int adminLogin() {
@@ -954,7 +1202,10 @@ int adminLogin() {
     printf("Password: ");
     scanf("%29s", pass);
 
-    if (strcmp(user, ADMIN_USER) == 0 && strcmp(pass, ADMIN_PASS) == 0) {
+    char saved[30];
+    getAdminPass(saved);
+
+    if (strcmp(user, ADMIN_USER) == 0 && strcmp(pass, saved) == 0) {
         printf("Login successful!\n");
         return 1;
     }
@@ -964,6 +1215,7 @@ int adminLogin() {
 
 void adminMenu() {
     int choice;
+    lowStockAlert();               /* warn about low or finished items once, at login */
     do {
         printf("\n===== ADMIN MENU =====\n");
         printf("1. View menu\n");
@@ -973,6 +1225,8 @@ void adminMenu() {
         printf("5. Delete item\n");
         printf("6. Sales reports\n");
         printf("7. View customer feedback\n");
+        printf("8. Reprint a bill\n");
+        printf("9. Change admin password\n");
         printf("0. Logout\n");
         choice = readInt("Enter choice: ");
 
@@ -984,6 +1238,8 @@ void adminMenu() {
             case 5: deleteItem(); break;
             case 6: reportsMenu(); break;
             case 7: viewFeedback(); break;
+            case 8: reprintBill(); break;
+            case 9: changePassword(); break;
             case 0: printf("Logged out.\n"); break;
             default: printf("Invalid choice.\n");
         }
@@ -999,7 +1255,7 @@ int main() {
     do {
         printf("\n===== SMART CANTEEN BILLING SYSTEM =====\n");
         printf("1. New order / billing\n");
-        printf("2. View menu\n");
+        printf("2. Browse menu (search / filter)\n");
         printf("3. Give feedback\n");
         printf("4. Admin login\n");
         printf("0. Exit\n");
@@ -1007,7 +1263,7 @@ int main() {
 
         switch (choice) {
             case 1: takeOrder(); break;
-            case 2: viewMenu(0); break;
+            case 2: browseMenu(); break;
             case 3: giveFeedback(); break;
             case 4:
                 if (adminLogin()) adminMenu();
@@ -1020,4 +1276,3 @@ int main() {
     saveMenu();
     return 0;
 }
-
