@@ -15,6 +15,7 @@
 #define BILLS_FILE "bills.txt"
 #define TOKEN_FILE "token.dat"
 #define SALES_ITEMS_FILE "salesitems.txt"
+#define FEEDBACK_FILE "feedback.txt"
 #define MAX_CART 20
 #define DISCOUNT_LIMIT 200.0   /* discount applies above this bill amount */
 #define DISCOUNT_RATE 0.10     /* 10% */
@@ -596,6 +597,7 @@ void takeOrder() {
     saveToken(token + 1);
 
     printf("\nThank you! Your token number is %d.\n", token);
+    printf("You can give us feedback from the main menu using this token.\n");
 
     /* tell the cashier if anything just sold out */
     for (int i = 0; i < cartCount; i++) {
@@ -816,6 +818,132 @@ void reportsMenu() {
     } while (choice != 0);
 }
 
+/* ---------- FEEDBACK ---------- */
+
+/* Returns 1 if a bill with this token exists in bills.txt, otherwise 0 */
+int tokenExists(int token) {
+    FILE *fp = fopen(BILLS_FILE, "r");
+    if (fp == NULL) {
+        return 0;                          /* no bills at all yet */
+    }
+    char line[200];
+    int t;
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        if (sscanf(line, "%d|", &t) == 1 && t == token) {
+            fclose(fp);
+            return 1;
+        }
+    }
+    fclose(fp);
+    return 0;
+}
+
+/* Returns 1 if this token has already given feedback, otherwise 0 */
+int feedbackGiven(int token) {
+    FILE *fp = fopen(FEEDBACK_FILE, "r");
+    if (fp == NULL) {
+        return 0;                          /* file doesn't exist yet */
+    }
+    char line[400];
+    int t;
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        if (sscanf(line, "%d|", &t) == 1 && t == token) {
+            fclose(fp);
+            return 1;
+        }
+    }
+    fclose(fp);
+    return 0;
+}
+
+/* Customer side: asks for the token, a rating and a comment */
+void giveFeedback() {
+    printf("\n--- Give Feedback ---\n");
+    int token = readInt("Enter your token number (0 to go back): ");
+    if (token == 0) {
+        return;
+    }
+
+    if (!tokenExists(token)) {
+        printf("Invalid token number. Feedback is only for completed bills.\n");
+        return;
+    }
+    if (feedbackGiven(token)) {
+        printf("Feedback for token %d has already been submitted. Thank you!\n", token);
+        return;
+    }
+
+    int rating;
+    while (1) {
+        rating = readInt("Rate us from 1 (poor) to 5 (excellent): ");
+        if (rating >= 1 && rating <= 5) {
+            break;
+        }
+        printf("Rating must be between 1 and 5.\n");
+    }
+
+    char comment[200];
+    printf("Your comment: ");
+    scanf(" %199[^\n]", comment);
+
+    /* '|' separates the fields in our file, so a '|' typed in the comment
+       would break the line. Replace it with '/' to be safe. */
+    for (int i = 0; comment[i] != '\0'; i++) {
+        if (comment[i] == '|') {
+            comment[i] = '/';
+        }
+    }
+
+    char dateTime[30];
+    time_t now = time(NULL);
+    strftime(dateTime, sizeof(dateTime), "%d-%m-%Y %H:%M", localtime(&now));
+
+    FILE *fp = fopen(FEEDBACK_FILE, "a");  /* "a" = add at the end */
+    if (fp == NULL) {
+        printf("Error: could not save feedback.\n");
+        return;
+    }
+    fprintf(fp, "%d|%s|%d|%s\n", token, dateTime, rating, comment);
+    fclose(fp);
+
+    printf("Thank you for your feedback!\n");
+}
+
+/* Admin side: shows every feedback with its token number */
+void viewFeedback() {
+    FILE *fp = fopen(FEEDBACK_FILE, "r");
+    if (fp == NULL) {
+        printf("No feedback received yet.\n");
+        return;
+    }
+
+    char line[400], date[20], comment[200];
+    int token, rating, count = 0, ratingSum = 0;
+
+    printf("\n===== CUSTOMER FEEDBACK =====\n");
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        if (sscanf(line, "%d|%19[^|]|%d|%199[^\n]",
+                   &token, date, &rating, comment) != 4) {
+            continue;                      /* skip a damaged line */
+        }
+        printf("Token  : %d\n", token);
+        printf("Date   : %s\n", date);
+        printf("Rating : %d/5\n", rating);
+        printf("Comment: %s\n", comment);
+        printf("-----------------------------\n");
+        count++;
+        ratingSum += rating;
+    }
+    fclose(fp);
+
+    if (count == 0) {
+        printf("No feedback received yet.\n");
+        return;
+    }
+    printf("Total feedbacks : %d\n", count);
+    printf("Average rating  : %.1f/5\n", (float)ratingSum / count);
+}
+
 /* ---------- ADMIN LOGIN & MENU ---------- */
 
 int adminLogin() {
@@ -844,6 +972,7 @@ void adminMenu() {
         printf("4. Edit item\n");
         printf("5. Delete item\n");
         printf("6. Sales reports\n");
+        printf("7. View customer feedback\n");
         printf("0. Logout\n");
         choice = readInt("Enter choice: ");
 
@@ -854,6 +983,7 @@ void adminMenu() {
             case 4: editItem(); break;
             case 5: deleteItem(); break;
             case 6: reportsMenu(); break;
+            case 7: viewFeedback(); break;
             case 0: printf("Logged out.\n"); break;
             default: printf("Invalid choice.\n");
         }
@@ -870,14 +1000,16 @@ int main() {
         printf("\n===== SMART CANTEEN BILLING SYSTEM =====\n");
         printf("1. New order / billing\n");
         printf("2. View menu\n");
-        printf("3. Admin login\n");
+        printf("3. Give feedback\n");
+        printf("4. Admin login\n");
         printf("0. Exit\n");
         choice = readInt("Enter choice: ");
 
         switch (choice) {
             case 1: takeOrder(); break;
             case 2: viewMenu(0); break;
-            case 3:
+            case 3: giveFeedback(); break;
+            case 4:
                 if (adminLogin()) adminMenu();
                 break;
             case 0: printf("Goodbye!\n"); break;
@@ -888,3 +1020,4 @@ int main() {
     saveMenu();
     return 0;
 }
+
